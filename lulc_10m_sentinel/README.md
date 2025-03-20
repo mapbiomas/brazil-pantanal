@@ -1,40 +1,47 @@
 <<div class="fluid-row" id="header">
     <img src='./misc/arcplan-logo.jpeg' height='70' width='auto' align='right'>
     <h1 class="title toc-ignore">Pantanal</h1>
-    <h4 class="author"><em>Developed by  ArcPlan - mrosa@arcplan.com.br</em></h4>
+    <h4 class="author"><em>Developed by  ArcPlan team - mariana@arcplan.com.br</em></h4>
 </div>
 
 # About
 This folder contains the scripts to classify and post-process the Pantanal Biome.
 
-We recommend that you read the Pantanal Biome Appendix of the Algorithm Theoretical Basis Document (ATBD).
-[Link ATBD](https://mapbiomas-br-site.s3.amazonaws.com/Metodologia/Pantanal_Appendix_-_ATBD_Col7_v7_v1.pdf)
+We recommend that you read the Pantanal Biome Appendix of the Algorithm Theoretical Basis Document (ATBD) available at MapBiomas website.
 
 # How to use
-First, you need to copy these scripts (including those in p04 folder) to your Google Earth Engine (GEE) account.
+First, you need to copy these scripts to your Google Earth Engine (GEE) account. Then you need to follow the steps bellow:
 
-# Pre-processing
+# 01 Pre-processing
 
-Step01: build stable pixels from Colleciton 6 and save a new asset
+Step01: build stable pixels from Collecitons 9 and save a new asset
 
-Step02:  export balanced training samples for each region
+Step02: exports stable samples filtered by region
 
-Step03:  export trained samples for each year
+Step03: exports stable samples with segmented clusters
 
-# Classification
+Step04: exports trained sampes
 
-Step04: classify and export classification for each region
+# 02 Classification:
 
-# Post-processing
+Step01: classify and export classification for each region
 
-Step05: merge classification of each region 
+Step02: blend regions classification
 
-Step06: and apply Gap fill filter to remove NODATA
+# 03 Post-processing:
 
-Step07: apply temporal filter
+Step01: spatial filter
 
-Step08: apply frequency filter
+Step02: apply flood area mask
 
-Step09: export water and wetland class
+Step03: apply MapBiomas Alerts mask 
 
-Step10: merge classification and water and wetland map
+Step04: apply tratectory based filter
+
+Step05: apply pasture area filter
+
+Step06: adds water and wetland data
+
+Step07: adds rocky outcrop data
+
+Step08: final adjustments before map integration
