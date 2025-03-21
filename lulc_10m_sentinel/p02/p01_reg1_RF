@@ -1,0 +1,270 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[-58.52936205752952, -16.48069309590335],
+          [-58.57330737002952, -17.101247170160555],
+          [-58.32062182315452, -17.478882098612424],
+          [-57.96905932315452, -17.656938725904308],
+          [-57.77130541690452, -17.897558502926692],
+          [-57.67242846377952, -18.273525077010646],
+          [-57.94708666690452, -19.23060191352147],
+          [-58.24371752627952, -19.71741814896459],
+          [-58.29864916690452, -20.274912605306977],
+          [-57.99103197940452, -20.96383809400686],
+          [-58.07892260440452, -21.578107423128746],
+          [-58.10089526065452, -22.230467998199895],
+          [-57.41974291690452, -22.26097380469566],
+          [-57.32086596377952, -21.88427321684344],
+          [-57.11212572940452, -21.49635339908078],
+          [-56.98028979190452, -21.056141489602602],
+          [-56.82648119815452, -20.45000902167834],
+          [-56.38702807315452, -20.48088774020802],
+          [-55.89264330752952, -20.50147010055191],
+          [-55.65094408877952, -20.50147010055191],
+          [-55.10162768252952, -19.44829624235093],
+          [-54.68414721377952, -18.482045076276716],
+          [-54.68414721377952, -17.792981029318906],
+          [-54.80499682315452, -17.048736849002278],
+          [-54.82696947940452, -16.522828344097242],
+          [-55.06866869815452, -16.217140881812828],
+          [-55.50812182315452, -15.847575770994556],
+          [-56.00250658877952, -15.604348700492018],
+          [-56.71661791690452, -15.93210807445483],
+          [-57.29889330752952, -15.805296326997492],
+          [-57.95807299502952, -15.535558114006925],
+          [-58.973632404627836, -15.897400514355134],
+          [-59.290155580858844, -16.315729569211467]]]);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// This script performs land cover classification using Sentinel-2 mosaics, training a Random Forest and a Gradient Tree Boosting classifier, and exports the results to Google Earth Engine Assets.
+
+var regioesCollection = ee.FeatureCollection('users/gee_arcplan/regs_mb_pantanal');//.filterBounds(geometry); // Loads the feature collection of regions
+Map.addLayer(regioesCollection); // Adds the region collection to the map
+
+var pontos = ee.FeatureCollection('projects/mapbiomas-workspace/AMOSTRAS/S2_2024/PANTANAL/SAMPLES/pontos_train_v1_2023') // Loads the feature collection of training points
+
+//var dirout = 'projects/mapbiomas-workspace/AMOSTRAS/S2_2024/PANTANAL/'; // This line is commented out and not used
+
+var regiaoID = 'reg1';  // Defines the region ID to process
+var coleta = false;   // Defines if we are collecting data (true) or generating a classification map (false)
+
+var anos = [2016,2017,2018,2019,2020,2021,2022,2023] // Defines the years to process
+if (coleta) {var anos = [2020]} // If collecting data, only the year 2020 is used
+
+var RFtrees = 100; // Defines the number of trees for the Random Forest classifier
+if (coleta) {var RFtrees = 200} // If collecting data, use 200 trees
+
+var versao_out = 1; // Defines the output version of the classification
+var versao_pt = 'S2_v1'; // Defines the version of the training samples
+var versao_estavel = '3' // Defines the version of the stable samples
+
+var bioma250mil = ee.FeatureCollection('projects/mapbiomas-workspace/AUXILIAR/biomas_IBGE_250mil'); // Loads the feature collection of biomes
+var bioma250mil_MA_vetor = bioma250mil.filterMetadata('Bioma','equals', 'Pantanal'); // Filters for the Pantanal biome
+var biomes = ee.Image('projects/mapbiomas-workspace/AUXILIAR/biomas-raster-41'); // Loads the raster version of the biome map
+var bioma250mil_MA = biomes.mask(biomes.eq(3)); // Masks the Pantanal biome from the biome raster map
+Map.addLayer(bioma250mil_MA,{},'layer bioma',false) // Adds the Pantanal biome map as a layer, initially turned off
+
+var palettes = require('users/mapbiomas/modules:Palettes.js'); // Loads the MapBiomas palettes module
+var vis = { // Defines visualization parameters for the classification maps
+    'min': 0,
+    'max': 62,
+    'palette': palettes.get('classification8')
+};
+var regioesCollection = ee.FeatureCollection('users/gee_arcplan/regs_mb_pantanal'); // Loads the feature collection of regions (redundant, but kept for consistency with the original code)
+var visParMedian2 = {bands: ['swir1_median', 'nir_median', 'red_median'],gain: [0.08, 0.06, 0.2],gamma: 0.85} // Defines visualization parameters for the median composite
+var bioma = "PANTANAL"; // Defines the biome
+var dirout = 'projects/mapbiomas-workspace/AMOSTRAS/S2_2024/PANTANAL/classifica_bruto/'; // Defines the output directory for the classification maps
+
+var S2_cluster = ee.Image('projects/mapbiomas-workspace/AMOSTRAS/S2_2024/PANTANAL/mosaicos_PANT_S2_clusters_2016_2023') // Loads the cluster image
+
+var limite = regioesCollection.filterMetadata('id_reg', "equals", regiaoID); // Filters the region collection to get the boundaries of the current region
+//var limite = reg_04_rev // This line is commented out and not used
+
+var mapa_estavel_col9 = ee.Image('projects/mapbiomas-workspace/AMOSTRAS/S2_2024/PANTANAL/SAMPLES/PANT_amostras_estaveis16a23_v3') // Loads the stable classification map
+Map.addLayer(mapa_estavel_col9, vis, 'mapa_estavel_col9', false); // Adds the stable map to the map, initially turned off
+var blank = ee.Image(0).mask(0); // Creates a blank image to paint the outlines
+var outline = blank.paint(limite, 'AA0000', 2); // Creates the outlines of the region
+var visPar = {'palette':'000000','opacity': 0.6}; // Defines the visualization parameters for the outline
+Map.addLayer(outline, visPar, regiaoID, false); // Adds the outline as a layer to the map, initially turned off
+
+var shuffle = function (collection, seed) { // Defines a function to shuffle a feature collection
+    collection = collection.randomColumn('random', seed || 1)
+        .sort('random', true)
+        .map(function (feature) {
+                var rescaled = ee.Number(feature.get('random')).multiply(1000000000).round();
+                return feature.set('new_id', rescaled)});
+    var randomIdList = ee.List(collection.reduceColumns(ee.Reducer.toList(), ['new_id']).get('list'));
+    var sequentialIdList = ee.List.sequence(1, collection.size());
+    var shuffled = collection.remap(randomIdList, sequentialIdList, 'new_id');
+    return shuffled;
+};
+
+var vis_hand = { // Defines visualization parameters for manual classification
+    'min': 0,
+    'max': 60,
+    'palette': 'blue,white,green,orange,red,brown'
+};
+
+for (var i_ano=0;i_ano<anos.length; i_ano++){ // Loops through each year
+  var ano = anos[i_ano];
+
+  var asset = 'projects/mapbiomas-mosaics/assets/SENTINEL/BRAZIL/mosaics-3'; // Defines the path of the Sentinel-2 mosaics
+
+  // Defines the bands to use for classification
+  var bandNames = ee.List([
+      //  AS 60 BANDAS MAIS IMPORTANTES PARA ESSA REGIAO
+      'longitude','latitude', 'ndvi_median_dry_'+ano,'ndvi_median_wet_'+ano,'ndwi_median_'+ano, 'green_median_texture_'+ano,
+      'mndwi_median_dry','mndwi_median_wet','mndwi_median',
+      'avi_median','awei_median','awei_median_dry','blue_median','blue_median_wet',
+    'blue_stdDev','brba_median','brba_median_dry','brba_median_wet','brightness_median',
+    'brightness_median_dry','brightness_median_wet','bsi_median_1','cvi_median','dswi5_median',
+    'evi_median','evi_median_wet','gcvi_median','gcvi_median_dry','gcvi_median_wet','gli_median',
+    'green_median_dry','green_median_texture','green_median_wet','green_stdDev','gvmi_median_wet',
+    'iia_median_wet','mbi_median_wet','nddi_median_dry','nddi_median_wet','ndvi_median','ndvi_median_wet',
+    'ndwi_median_wet','nir_median','nir_median_contrast','osavi_median_wet','ratio_median','ratio_median_wet',
+    'red_edge_1_median','red_edge_1_median_dry','red_edge_1_median_wet','red_edge_1_stdDev','red_edge_2_median',
+    'red_edge_2_median_dry','red_edge_3_median','red_edge_3_stdDev','red_edge_4_median','red_edge_4_median_dry',
+    'red_edge_4_median_wet','red_median','red_median_contrast','red_median_dry','red_median_dry_contrast',
+    'red_median_wet','red_min','red_stdDev','ri_median','ri_median_wet','rvi_median','rvi_median_1',
+    'rvi_median_wet','swir1_median','swir1_median_dry','swir1_median_wet','swir1_stdDev','swir2_median',
+    'swir2_median_dry','swir2_median_wet','swir2_stdDev','ui_median_wet','wetness_median',
+    'wetness_median_dry','wetness_median_wet'
+    ])
+  // TODAS AS 143 BANDAS PARA FEATURE IMPORTANCE
+
+  
+  var collection = ee.ImageCollection(asset)
+        .filter(ee.Filter.eq('version', '3'))
+        .filter(ee.Filter.eq('year', ano))
+        .filter(ee.Filter.inList('biome', [
+            'PANTANAL',
+        ])); 
+
+  var mosaicoTotal = collection.mosaic() // Creates a mosaic from the collection
+
+  var addIndexCaatinga = require('users/gee_arcplan/MapBiomas_Col9_Pantanal:processa_Bandas_Sentinel2_CAATINGA'); // Loads a script for processing Sentinel-2 bands
+  mosaicoTotal = addIndexCaatinga.get(mosaicoTotal); // Adds indices to the mosaic
+
+   // Adds the cluster bands to the mosaic
+  mosaicoTotal = mosaicoTotal.addBands(S2_cluster.select([
+    'clusters_'+ano, 'ndvi_median_dry_'+ano,'ndvi_median_wet_'+ano,'ndwi_median_'+ano, 'green_median_texture_'+ano
+    ]))
+    
+  Map.addLayer(mosaicoTotal, {'bands': ['swir1_median', 'nir_median', 'red_median'],
+    'gain': [0.08, 0.07, 0.2],'gamma': 0.85}, 'Sentinel 2 '+ano, false); // Adds the mosaic as a layer to the map, initially turned off
+
+  // Loads the training samples for the current year and region
+  var BDamostras = ee.FeatureCollection('projects/mapbiomas-workspace/AMOSTRAS/S2_2024/PANTANAL/SAMPLES/pontos_train_v1_'+ano)
+                    .filterMetadata('id_reg', 'equals', regiaoID)
+
+    // Filters the training samples by land cover class
+    var BDflo = BDamostras.filterMetadata("reference", "equals", 3)
+    var BDsav = BDamostras.filterMetadata("reference", "equals", 4)//.limit(100)
+  //  var BDreflo = BDamostras.filterMetadata("reference", "equals", 11)
+   // var BDvarzea = BDamostras.filterMetadata("reference", "equals", 11)
+    var BDcampo = BDamostras.filterMetadata("reference", "equals", 12)
+ //   var BDOutroNFlo = BDamostras.filterMetadata("reference", "equals", 13)
+    var BDagri = BDamostras.filterMetadata("reference", "equals", 19)
+    var BDpasr = BDamostras.filterMetadata("reference", "equals", 21)
+    var BDNaoVeg = BDamostras.filterMetadata("reference", "equals", 25).limit(250)
+    var BDagua = BDamostras.filterMetadata("reference", "equals", 33)
+
+
+if (coleta) {
+print('BDflo',BDflo.size())
+print('BDsav',BDsav.size())
+//print('BDvar',BDvarzea.size())
+print('BDcam',BDcampo.size())
+//print('BDOut',BDOutroNFlo.size())
+//print('BDAfl',BDAflora.size())
+print('BDagr',BDagri.size())
+print('BDNao',BDNaoVeg.size())
+print('BDagu',BDagua.size())
+
+
+}
+
+    // Creates a training set
+  var training = BDflo.merge(BDcampo).merge(BDsav).merge(BDNaoVeg)//.merge(BDAflora)
+                     .merge(BDagri).merge(BDpasr).merge(BDagua)
+                      //complementares
+                     // .merge(training_flo).merge(training_umd).merge(training_agr).merge(training_sav).merge(training_nflo)//.merge(training_agr)
+                      //.merge(training_agu)
+                      //.merge(training_cam)
+
+  // Trains a Random Forest classifier
+  var classifierRF = ee.Classifier.smileRandomForest({numberOfTrees: RFtrees, variablesPerSplit:1}).train(training, 'reference', bandNames);
+  if (coleta) {print(classifierRF.explain())} // If collecting data, print the classifier explanation
+    
+  // Trains a Gradient Tree Boosting classifier
+  var classifierGTB = ee.Classifier.smileGradientTreeBoost({numberOfTrees: 20, shrinkage: 0.1, samplingRate: 0.8, loss: 'LeastSquares'}).train(training, 'reference', bandNames);
+
+  // Classifies the mosaic using the Random Forest classifier
+  var classifiedRF = mosaicoTotal.classify(classifierRF).mask(mosaicoTotal.select('blue_median'));
+  
+  // Classifies the mosaic using the Gradient Tree Boosting classifier
+  var classifiedGTB = mosaicoTotal.classify(classifierGTB).mask(mosaicoTotal.select('blue_median'));
+  
+  classifiedRF = classifiedRF.select(['classification'],['classification_'+ano]).clip(limite.geometry()).toInt8() // Selects the classification band, renames it and clips to the boundaries of the region
+  classifiedGTB = classifiedGTB.select(['classification'],['classification_'+ano]).clip(limite.geometry()).toInt8() // Selects the classification band, renames it and clips to the boundaries of the region
+  
+  if (coleta) { // If collecting data, adds the classification maps as layers to the map
+    Map.addLayer(classifiedRF, vis, 'RF'+ano+"_"+regiaoID, false);
+    Map.addLayer(classifiedGTB, vis, 'GTB'+ano+"_"+regiaoID, false);
+  }
+
+
+  if (i_ano == 0){ var classified16a23RF = classifiedRF;  var classified16a23GTB = classifiedGTB}  // If it is the first year, initializes the classification variables
+  else {classified16a23RF = classified16a23RF.addBands(classifiedRF); classified16a23GTB = classified16a23GTB.addBands(classifiedGTB)} // If it is not the first year, adds the classification of the current year to the previous classifications
+}
+
+
+if (coleta) {} // If collecting data, nothing is exported
+   else // If generating classification maps, exports the results
+   {
+     classified16a23RF = classified16a23RF // Sets some metadata for the final classification
+     .set('territory', 'BRAZIL')
+     .set('biome', 'PANTANAL')
+     .set('source', 'arcplan')
+     .set('version', '1')
+     .set('collection_id',versao_out)
+
+     classified16a23GTB = classified16a23GTB // Sets some metadata for the final classification
+     .set('territory', 'BRAZIL')
+     .set('biome', 'PANTANAL')
+     .set('source', 'arcplan')
+     .set('version', '1')
+     .set('collection_id',versao_out)
+     
+     // Exports the Random Forest classification to Google Earth Engine Assets
+    Export.image.toAsset({
+       "image": classified16a23RF.toInt8(),
+       "description": regiaoID+'-'+'RF_SENTINEL2_v'+versao_out,
+       "assetId": dirout + regiaoID+'-'+'RF_SENTINEL2_v'+versao_out,
+       "scale": 10,
+       "pyramidingPolicy": {
+           '.default': 'mode'
+       },
+       "maxPixels": 1e13,
+       "region": geometry
+     });    
+     
+    // Exports the Gradient Tree Boosting classification to Google Earth Engine Assets
+    Export.image.toAsset({
+       "image": classified16a23GTB.toInt8(),
+       "description": regiaoID+'-'+'GTB_SENTINEL2_v'+versao_out,
+       "assetId": dirout + regiaoID+'-'+'GTB_SENTINEL2_v'+versao_out,
+       "scale": 10,
+       "pyramidingPolicy": {
+           '.default': 'mode'
+       },
+       "maxPixels": 1e13,
+       "region": geometry
+     });    
+}
+
+
+//Developed by ArcPlan Team
+//Marcos Rosa, Eduardo Rosa, Mariana Dias
+//Updated Jan 2025 - MD - mariana@arcplan.com.br

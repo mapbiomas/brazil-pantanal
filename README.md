@@ -5,57 +5,6 @@
 </div>
 
 # About
-This folder contains the scripts to classify and post-process the Pantanal Biome.
+This directory gathers the scripts used in MapBiomas collections for mapping land use and land cover classes in the Pantanal biome. They are divided by the source of satellite imagery (Landsat or Sentinel) and by data collections. It is always recommended to use the most recent collection (highest number) to replicate the steps.
 
-We recommend that you read the Pantanal Biome Appendix of the Algorithm Theoretical Basis Document (ATBD).
-
-[Link ATBD](https://storage.googleapis.com/mapbiomas-public/initiatives/brasil/collection_9/downloads/pantanal_appendix_atbd_col9.pdf)
-
-# How to use
-First, you need to copy these scripts to your Google Earth Engine (GEE) account.
-
-# 01 Annual Land Use Land Cover classification
-
-### Pre-processing:
-
-Step01: build stable pixels from Collecitons 6, 7.1 and 8 and save a new asset
-
-Step02: exports stable samples filtered by GEDI data
-
-Step03: training and exporting stable samples for each year
-
-### Classification:
-
-Step04a: classify and export classification for each region
-
-Step04b: blend regions classification
-
-### Post-processing:
-
-Step05: Gap Fill filter to remove 'non observed data'
-
-# 02 Monthly Water and Wetland classification
-
-### Pre-processing:
-
-Step01: monthly sampling of Pantanal flooding
-
-Step02: monthly samples training
-
-### Classification:
-
-Step03: monthly 'water' and 'wetland' classification using random forest classifier and NDDI Index
-
-### Post-processing:
-
-Step04: fill the pixels without Landsat image with the soon driest month pixel
-
-Step05: creates and exports annual frequency data based on monthly data
-
-# 03 Post-classification
-
-Step01: apply temporal and trajectory filters
-
-Step02: apply deforestation and grasslands masks
-
-Step03: final adjustments before map integration
+Questions and suggestions can be forwarded to the development team: mariana@arcplan.com.br
