@@ -1,0 +1,87 @@
+/**
+ * @name 02_export_collection_mask.js
+ * @description Applies a spatial filter (focalMin/erosion) over the stable samples map to create a restricted and conservative mask, capturing only the core of the classes for training collection.
+ * @author @Mariana Dias / mariana@arcplan.com.br
+ * @biome Pantanal
+ */
+
+// ==============================================================================
+// 1. PARAMETERS AND CONSTANTS
+// ==============================================================================
+var VERSION_OUT = '1'; // Starting Collection 3 at v1
+var DIR_OUT = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/';
+
+// Asset generated in the previous script (01_export_stable_samples.js)
+// Update this link if the version of the previous run changes
+var ASSET_STABLE_SAMPLES = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/PANT_stable_samples_col3_v1'; 
+
+// ==============================================================================
+// 2. IMPORTS AND GEOMETRIES
+// ==============================================================================
+var palettes = require('users/mapbiomas/modules:Palettes.js');
+
+// Clipping geometry
+var geometry = ee.Geometry.Polygon([
+    [[-58.5293, -16.4806], [-58.5733, -17.1012], [-58.3206, -17.4788], [-57.9690, -17.6569], 
+     [-57.7713, -17.8975], [-57.6724, -18.2735], [-57.9470, -19.2306], [-58.2437, -19.7174], 
+     [-58.2986, -20.2749], [-57.9910, -20.9638], [-58.0789, -21.5781], [-58.1008, -22.2304], 
+     [-57.4197, -22.2609], [-57.3208, -21.8842], [-57.1121, -21.4963], [-56.9802, -21.0561], 
+     [-56.8264, -20.4500], [-56.3870, -20.4808], [-55.8926, -20.5014], [-55.6509, -20.5014], 
+     [-55.1016, -19.4482], [-54.6841, -18.4820], [-54.6841, -17.7929], [-54.8049, -17.0487], 
+     [-54.8269, -16.5228], [-55.0686, -16.2171], [-55.5081, -15.8475], [-56.0025, -15.6043], 
+     [-56.7166, -15.9321], [-57.2988, -15.8053], [-57.9580, -15.5355], [-58.9736, -15.8974], 
+     [-59.2901, -16.3157]]
+]);
+
+var visPar = { min: 0, max: 62, palette: palettes.get('classification8') };
+
+// ==============================================================================
+// 3. PROCESSING: COLLECTION MASKS (FOCAL MIN)
+// ==============================================================================
+// Load the stable pixels map
+var stableBase = ee.Image(ASSET_STABLE_SAMPLES);
+
+// Apply focal minimum filter (erosion) to extract only the "core" of the patches
+// Classes with focalMin(2) are eroded more than classes with focalMin(1)
+var class3  = stableBase.eq(3).unmask(0).focalMin(2).selfMask().remap([1],[3]).rename('reference');
+var class4  = stableBase.eq(4).unmask(0).focalMin(2).selfMask().remap([1],[4]).rename('reference');
+var class11 = stableBase.eq(11).unmask(0).focalMin(1).selfMask().remap([1],[11]).rename('reference');
+var class12 = stableBase.eq(12).unmask(0).focalMin(1).selfMask().remap([1],[12]).rename('reference');
+var class19 = stableBase.eq(19).unmask(0).focalMin(1).selfMask().remap([1],[19]).rename('reference');
+var class21 = stableBase.eq(21).unmask(0).focalMin(1).selfMask().remap([1],[21]).rename('reference');
+var class25 = stableBase.eq(25).unmask(0).focalMin(1).selfMask().remap([1],[25]).rename('reference');
+var class29 = stableBase.eq(29).unmask(0).focalMin(2).selfMask().remap([1],[29]).rename('reference');
+var class33 = stableBase.eq(33).unmask(0).focalMin(1).selfMask().remap([1],[33]).rename('reference');
+
+// Combine all processed classes
+var finalStableMask = class3
+    .blend(class4)
+    .blend(class11)
+    .blend(class12)
+    .blend(class19)
+    .blend(class21)
+    .blend(class25)
+    .blend(class29)
+    .blend(class33);
+
+// ==============================================================================
+// 4. VISUALIZATION (Debug)
+// ==============================================================================
+Map.addLayer(stableBase, visPar, 'Stable Original (Base)', false);
+Map.addLayer(class3, visPar, 'Test Forest (3)', false);
+Map.addLayer(class21, visPar, 'Test Pasture (21)', false);
+Map.addLayer(finalStableMask, visPar, 'Final Stable (Collection Mask)', true);
+
+// ==============================================================================
+// 5. EXPORT
+// ==============================================================================
+var outputName = 'PANT_collection_mask_col3_v' + VERSION_OUT;
+
+Export.image.toAsset({
+    image: finalStableMask,
+    description: outputName,
+    assetId: DIR_OUT + outputName,
+    region: geometry,
+    scale: 10,
+    maxPixels: 1e13
+});

@@ -1,0 +1,54 @@
+/**
+ * @name 03_extract_embeddings.js
+ * @description Extracts Satellite Embeddings (Google) values for the annually drawn/trained samples.
+ * @author @Mariana Dias / mariana@arcplan.com.br
+ * @biome Pantanal
+ */
+
+// ==============================================================================
+// 1. PARAMETERS AND CONSTANTS
+// ==============================================================================
+var VERSION_IN = '4';  // Input samples version (adjust as needed)
+var VERSION_OUT = '1'; // Output version (Starting Collection 3)
+
+var DIR_IN = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/trained/';
+var DIR_OUT = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/trained/';
+
+var YEARS = [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024];
+
+// ==============================================================================
+// 2. PROCESSING AND EXPORT
+// ==============================================================================
+
+YEARS.forEach(function(year) {
+  
+  // 2.1. Load previously trained points for the corresponding year
+  var inputAsset = DIR_IN + 'pontos_S2_trained_S2_v' + VERSION_IN + '_' + year + '_all_regions';
+  var trainedPoints = ee.FeatureCollection(inputAsset);
+  
+  // 2.2. Create the annual Google embeddings mosaic
+  var embeddingMosaic = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+      .filterDate(year + '-01-01', year + '-12-31')
+      .mosaic();
+
+  // 2.3. Extract embedding values (reduceRegions) for the sample points
+  var pointsWithEmbeddings = embeddingMosaic.reduceRegions({
+    collection: trainedPoints,
+    reducer: ee.Reducer.mean(),
+    scale: 10,
+    tileScale: 4
+  });
+
+  // 2.4. Define task name and output asset path
+  var outputName = 'pontos_S2_trained_v' + VERSION_OUT + '_' + year + '_all_regions_with_embeddings';
+  var outputAssetId = DIR_OUT + outputName;
+  var taskDescription = 'Trained_with_Embeddings_' + year;
+
+  // 2.5. Launch the export task
+  Export.table.toAsset({
+    collection: pointsWithEmbeddings,
+    description: taskDescription,
+    assetId: outputAssetId
+  });
+  
+});

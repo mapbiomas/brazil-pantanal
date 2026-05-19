@@ -1,0 +1,122 @@
+/**
+ * @name 01_export_stable_samples.js
+ * @description Filters and exports stable pixels from previous collections to be used as training samples for Collection 3 (Sentinel).
+ * @author @Mariana Dias / mariana@arcplan.com.br
+ * @biome Pantanal
+ */
+
+// ==============================================================================
+// 1. PARAMETERS AND CONSTANTS
+// ==============================================================================
+var VERSION_OUT = '1'; 
+var DIR_OUT = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/';
+
+// Base Assets
+var ASSET_COL_PREVIOUS = 'projects/mapbiomas-public/assets/brazil/lulc_10m/collection2/mapbiomas_10m_collection2_integration_v1';
+var ASSET_BIOMES = 'projects/mapbiomas-workspace/AUXILIAR/biomas-raster';
+
+var YEARS = ['2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023'];
+
+// Remapping Rules (From -> To)
+var CLASS_FROM = [3, 4, 5, 9, 11, 12, 13, 15, 18, 19, 20, 36, 39, 40, 41, 21, 22, 23, 24, 25, 26, 29, 30, 31, 32, 33];
+var CLASS_TO   = [3, 4, 3, 9, 11, 12, 13, 21, 19, 19, 21, 21, 21, 19, 19, 21, 25, 25, 25, 25, 33, 29, 25, 12, 12, 33];
+
+// Minimum frequency (in years) to consider a pixel as "stable"
+var CLASS_FREQUENCY = {
+    "3": 8, "4": 8, "9": 8, "11": 8, "12": 8, "19": 8, "21": 8, "25": 8, "29": 8, "33": 8
+};
+
+// ==============================================================================
+// 2. IMPORTS AND GEOMETRIES
+// ==============================================================================
+var palettes = require('users/mapbiomas/modules:Palettes.js');
+
+// Pantanal Biome Boundary (IBGE 250k)
+var biomes250k = ee.FeatureCollection('projects/mapbiomas-workspace/AUXILIAR/biomas_IBGE_250mil');
+var pantanalLimit = biomes250k.filterMetadata('Bioma', 'equals', 'Pantanal');
+
+// Processing ROI
+var geometry = ee.Geometry.Polygon([
+    [[-58.5293, -16.4806], [-58.5733, -17.1012], [-58.3206, -17.4788], [-57.9690, -17.6569], 
+     [-57.7713, -17.8975], [-57.6724, -18.2735], [-57.9470, -19.2306], [-58.2437, -19.7174], 
+     [-58.2986, -20.2749], [-57.9910, -20.9638], [-58.0789, -21.5781], [-58.1008, -22.2304], 
+     [-57.4197, -22.2609], [-57.3208, -21.8842], [-57.1121, -21.4963], [-56.9802, -21.0561], 
+     [-56.8264, -20.4500], [-56.3870, -20.4808], [-55.8926, -20.5014], [-55.6509, -20.5014], 
+     [-55.1016, -19.4482], [-54.6841, -18.4820], [-54.6841, -17.7929], [-54.8049, -17.0487], 
+     [-54.8269, -16.5228], [-55.0686, -16.2171], [-55.5081, -15.8475], [-56.0025, -15.6043], 
+     [-56.7166, -15.9321], [-57.2988, -15.8053], [-57.9580, -15.5355], [-58.9736, -15.8974], 
+     [-59.2901, -16.3157]]
+]);
+
+// ==============================================================================
+// 3. VISUALIZATION
+// ==============================================================================
+var visParClass = { min: 0, max: 62, palette: palettes.get('classification7') };
+var visParRef = { min: 0, max: 62, palette: palettes.get('classification8') };
+
+// ==============================================================================
+// 4. MAIN PROCESSING
+// ==============================================================================
+// Load previous collection map clipped to biome
+var previousCol = ee.Image(ASSET_COL_PREVIOUS).clip(pantanalLimit);
+
+// Remap classes for each year and create an ImageCollection
+var remappedList = YEARS.map(function(year) {
+    var image = previousCol.select('classification_' + year);
+    return image.remap(CLASS_FROM, CLASS_TO).int8();
+});
+
+var annualCollection = ee.ImageCollection(remappedList);
+
+// ==============================================================================
+// 5. STABILITY CALCULATION
+// ==============================================================================
+/**
+ * Generates a frequency mask for a specific class ID
+ */
+var getFrequencyMask = function(collection, classId) {
+    var classIdInt = parseInt(classId, 10);
+    
+    var maskCollection = collection.map(function(image) {
+        return image.eq(classIdInt);
+    });
+    
+    var frequency = maskCollection.reduce(ee.Reducer.sum());
+    
+    var frequencyMask = frequency.gte(CLASS_FREQUENCY[classId])
+        .multiply(classIdInt)
+        .toByte();
+        
+    return frequencyMask.mask(frequencyMask.eq(classIdInt))
+                        .rename('frequency')
+                        .set('class_id', classId);
+};
+
+// Apply frequency filter for all target classes
+var frequencyMasks = Object.keys(CLASS_FREQUENCY).map(function(classId) {
+    return getFrequencyMask(annualCollection, classId);
+});
+
+var referenceMap = ee.ImageCollection.fromImages(frequencyMasks)
+    .reduce(ee.Reducer.firstNonNull())
+    .clip(geometry);
+
+// Clean up and rename
+referenceMap = referenceMap.mask(referenceMap.neq(27)).rename("reference");
+
+Map.addLayer(referenceMap, visParRef, 'Stable Pixels (2016-2023)', true);
+
+// ==============================================================================
+// 6. EXPORT
+// ==============================================================================
+var outputName = 'PANT_stable_samples_col3_v' + VERSION_OUT;
+
+Export.image.toAsset({
+    image: referenceMap.toInt8(),
+    description: outputName,
+    assetId: DIR_OUT + outputName,
+    scale: 10,
+    pyramidingPolicy: { '.default': 'distributed' }, // 'distributed' or 'mode' for classes
+    maxPixels: 1e13,
+    region: geometry
+});

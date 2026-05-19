@@ -1,0 +1,202 @@
+/**
+ * @name 03_post_classification_master.js
+ * @description Master script for Post-Classification. Applies Mode filters, Trajectory rules, Temporal Filters (3-year window), Topography masks, and Final Spatial filters.
+ * @author @Mariana Dias / mariana@arcplan.com.br
+ * @biome Pantanal
+ */
+
+// ==============================================================================
+// 1. PARAMETERS AND CONSTANTS
+// ==============================================================================
+var IS_DEBUG = false;
+
+var VERSION_IN = '23'; // Input Version (e.g., from Gap Fill)
+var VERSION_OUT = '28'; // Output Version (Final for Integration)
+
+var DIR_BASE = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/';
+var ASSET_IN = DIR_BASE + 'PANT_colS2Emb_Anual_' + VERSION_IN;
+var PREFIX_OUT = 'pant_s2Emb_final_v';
+
+var YEARS = [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
+
+var MIN_CONNECT_PIXEL_FINAL = 8; // Final spatial filter minimum size
+
+// ==============================================================================
+// 2. IMPORTS AND EXTERNAL ASSETS
+// ==============================================================================
+var palettes = require('users/mapbiomas/modules:Palettes.js');
+var visPar = { min: 0, max: 62, palette: palettes.get('classification8') };
+
+// Geometries
+var regionsCollection = ee.FeatureCollection('projects/ee-arcplan-df/assets/regioes_pantanal');
+var targetGeometry = regionsCollection.geometry().bounds();
+
+// Input Image
+var inputClassification = ee.Image(ASSET_IN);
+
+// Trajectory and Presence Assets
+var DIR_TRAJ = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/trajectories/';
+var trajFlo = ee.Image(DIR_TRAJ + 'trajectories_3_v3');
+var trajPast = ee.Image(DIR_TRAJ + 'trajectories_21_v3');
+var nPresWater = ee.Image(DIR_TRAJ + 'number_of_presence_33_v3');
+var nPresFlood = ee.Image(DIR_TRAJ + 'number_of_presence_11_v3');
+var nPresGrass = ee.Image(DIR_TRAJ + 'number_of_presence_12_v3');
+var nPresPast = ee.Image(DIR_TRAJ + 'number_of_presence_21_v3');
+
+// ==============================================================================
+// 3. PRE-CALCULATED MASKS (MODE & TOPOGRAPHY)
+// ==============================================================================
+// 3.1. Calculate Mode across all years
+var imgColList = YEARS.map(function(y) { return inputClassification.select('classification_' + y).rename('class'); });
+var imgMode = ee.ImageCollection(imgColList).mode();
+
+// 3.2. Topography Masks (SRTM)
+var dem = ee.Image("USGS/SRTMGL1_003");
+var slopeMask = ee.Terrain.slope(dem).gt(15);
+var triMask = dem.reduceNeighborhood({ reducer: ee.Reducer.stdDev(), kernel: ee.Kernel.square(3) }).gt(25);
+
+// Permanent shadow calculation
+function getShadow(azimuthDeg) {
+    var az = ee.Image.constant(azimuthDeg).multiply(Math.PI/180);
+    var zen = ee.Image.constant(45).multiply(Math.PI/180);
+    var slopeRad = ee.Terrain.slope(dem).multiply(Math.PI/180);
+    var aspectRad = ee.Terrain.aspect(dem).multiply(Math.PI/180);
+    return zen.cos().multiply(slopeRad.cos()).add(zen.sin().multiply(slopeRad.sin()).multiply((az.subtract(aspectRad)).cos()));
+}
+var shadowMask = getShadow(45).lt(0.1).and(getShadow(135).lt(0.1)).and(getShadow(225).lt(0.1)).and(getShadow(315).lt(0.1));
+
+var topoMask = slopeMask.or(triMask).or(shadowMask);
+// Clean small topography fragments
+topoMask = topoMask.connectedPixelCount(1000, true).gte(150).selfMask();
+
+// ==============================================================================
+// 4. RULE-BASED CORRECTIONS (MAPPED BY YEAR)
+// ==============================================================================
+var applyRules = function(year) {
+    var img = inputClassification.select('classification_' + year);
+
+    // --- A. MODE RULES ---
+    // 1. If mode is Water (33), everything except water becomes Grassland (12).
+    img = img.where(imgMode.eq(33).and(img.neq(33)), 12);
+    // 2. If mode is Agriculture (19), Outcrop (29), or Non-Veg (25) -> force class.
+    img = img.where(imgMode.eq(19), 19).where(imgMode.eq(29), 29).where(imgMode.eq(25), 25);
+    // 3. If mode is NOT Outcrop (29), existing Outcrop becomes Grassland (12).
+    img = img.where(imgMode.neq(29).and(img.eq(29)), 12);
+    // 4. If mode is Savanna (4), Forest (3) becomes Savanna (4).
+    img = img.where(imgMode.eq(4).and(img.eq(3)), 4);
+    // 5. If mode is Forest (3), Savanna (4) becomes Forest (3).
+    img = img.where(imgMode.eq(3).and(img.eq(4)), 3);
+    // 6. If mode is Grassland (12), Forest (3) -> Savanna (4), and Pasture (21) -> Grassland (12).
+    img = img.where(imgMode.eq(12).and(img.eq(3)), 4).where(imgMode.eq(12).and(img.eq(21)), 12);
+    // 7. If mode is Pasture (21) AND 2017 & 2025 are Pasture -> Force Pasture.
+    var persistentPasture = imgMode.eq(21).and(inputClassification.select('classification_2017').eq(21)).and(inputClassification.select('classification_2025').eq(21));
+    img = img.where(persistentPasture, 21);
+
+    // --- B. TRAJECTORY RULES ---
+    // 8. If water/flood presence >= 1 -> Forest(3)/Savanna(4) become Grassland(12).
+    var floodedPresence = nPresWater.gte(1).and(nPresFlood.gte(1));
+    img = img.where(floodedPresence.and(img.eq(3).or(img.eq(4))), 12);
+    
+    // 9. Forest trajectory rules
+    img = img.where(trajFlo.eq(2).and(img.eq(3)), 4); // Traj 2 -> Savanna
+    var forestToGrass = trajFlo.eq(4).or(trajFlo.eq(6)).and(nPresGrass.gte(1));
+    img = img.where(forestToGrass.and(img.eq(3)), 12); // Traj 4/6 -> Grassland
+    
+    // 10. Pasture trajectory rules (Grassland 12 becomes Pasture 21)
+    var past17 = inputClassification.select('classification_2017').eq(21);
+    var rulePastA = past17.and(nPresPast.gte(4));
+    var rulePastB = trajPast.eq(6).and(nPresPast.gte(4));
+    var rulePastC = trajPast.eq(3).and(nPresPast.gte(3));
+    img = img.where((rulePastA.or(rulePastB).or(rulePastC)).and(img.eq(12)), 21);
+
+    // --- C. TOPOGRAPHY RULE ---
+    // 11. Water (33) in rough terrain/shadows becomes Grassland (12).
+    img = img.where(topoMask.and(img.eq(33)), 12);
+
+    return img.rename('classification_' + year);
+};
+
+// Apply all rules to all years and compile into a single image
+var ruledImage = ee.ImageCollection(YEARS.map(applyRules)).toBands();
+// Rename bands to remove the collection index prefix
+var newNames = ruledImage.bandNames().map(function(name) { return ee.String(name).replace('^\\d+_', ''); });
+ruledImage = ruledImage.rename(newNames);
+
+// ==============================================================================
+// 5. TEMPORAL FILTER (3-YEAR WINDOW)
+// ==============================================================================
+var applyTemporalFilter = function(img, classesToFilter) {
+    var filteredImg = img;
+    classesToFilter.forEach(function(targetClass) {
+        var yearCol = ee.ImageCollection(YEARS.slice(1, -1).map(function(year) {
+            var curr = img.select('classification_' + year);
+            var prev = img.select('classification_' + (year - 1));
+            var next = img.select('classification_' + (year + 1));
+            
+            // Mask where prev == target, next == target, but current is DIFFERENT
+            var anomalyMask = prev.eq(targetClass).and(next.eq(targetClass)).and(curr.neq(targetClass));
+            return curr.where(anomalyMask, targetClass).rename('classification_' + year);
+        })).toBands();
+        
+        // Clean band names
+        var cleanNames = yearCol.bandNames().map(function(name) { return ee.String(name).replace('^\\d+_', ''); });
+        yearCol = yearCol.rename(cleanNames);
+        
+        // Combine with unmodified first and last years
+        filteredImg = img.select('classification_' + YEARS[0])
+            .addBands(yearCol)
+            .addBands(img.select('classification_' + YEARS[YEARS.length - 1]));
+    });
+    return filteredImg;
+};
+
+// Apply temporal filter for specific classes
+var tempFiltered = applyTemporalFilter(ruledImage, [19, 21, 4, 12, 3]);
+
+// ==============================================================================
+// 6. FINAL SPATIAL FILTER & REMAPS
+// ==============================================================================
+var finalImage = ee.Image();
+
+YEARS.forEach(function(year, index) {
+    var bandName = 'classification_' + year;
+    var imgYear = tempFiltered.select(bandName);
+    
+    // Minimum area (connected pixels) filter
+    var focalMode = imgYear.unmask(0).focal_mode(1, 'square', 'pixels');
+    var connections = imgYear.unmask(0).connectedPixelCount({maxSize: 30, eightConnected: false});
+    var maskedSmall = imgYear.blend(focalMode.updateMask(connections.lte(MIN_CONNECT_PIXEL_FINAL)));
+    
+    // Clean zeros and remap Agriculture (19) to Temporary Crops (41)
+    maskedSmall = maskedSmall.updateMask(maskedSmall.neq(0));
+    maskedSmall = maskedSmall.where(maskedSmall.eq(19), 41);
+    
+    if (index === 0) finalImage = maskedSmall;
+    else finalImage = finalImage.addBands(maskedSmall);
+});
+
+// ==============================================================================
+// 7. EXPORT
+// ==============================================================================
+finalImage = finalImage
+    .set('territory', 'BRAZIL')
+    .set('biome', 'PANTANAL')
+    .set('source', 'arcplan')
+    .set('version', VERSION_OUT)
+    .set('collection_id', 3.0)
+    .set('description', 'Master filter: Mode, Trajectories, 3Y Temporal, Topo, Spatial Final');
+
+if (IS_DEBUG) {
+    Map.addLayer(inputClassification.select('classification_2023'), visPar, 'Input 2023', false);
+    Map.addLayer(finalImage.select('classification_2023'), visPar, 'Final Filtered 2023', true);
+} else {
+    Export.image.toAsset({
+        image: finalImage.toInt8(),
+        description: PREFIX_OUT + VERSION_OUT,
+        assetId: DIR_BASE + PREFIX_OUT + VERSION_OUT,
+        scale: 10,
+        pyramidingPolicy: { '.default': 'mode' },
+        maxPixels: 1e13,
+        region: targetGeometry
+    });
+}

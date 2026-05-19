@@ -1,0 +1,217 @@
+/**
+ * @name 01_random_forest_reg0.js
+ * @description Random Forest classification for Region 0 using Sentinel embeddings and topographic features.
+ * @author @Mariana Dias / mariana@arcplan.com.br
+ * @biome Pantanal
+ */
+
+// ==============================================================================
+// 1. PARAMETERS AND CONSTANTS
+// ==============================================================================
+var IS_DEBUG = false; // Set to true to display layers on Map instead of exporting
+var SEED = 1;
+
+var VERSION_IN = '14'; // Version of the input trained samples
+var VERSION_OUT = '1'; // Output version for Collection 3
+var REGION_ID = '0';
+
+var DIR_SAMPLES = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/trained/';
+var DIR_OUT = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/trained/'; // Or your specific classification export path
+
+var YEARS = [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
+var RF_TREES = IS_DEBUG ? 20 : 200;
+
+// --- A. Balancing Limits (Stable Samples) ---
+var LIMIT_FOREST      = 1250; // Class 3
+var LIMIT_SAVANNA     = 1600; // Class 4
+var LIMIT_FLOODED     = 1000; // Class 11
+var LIMIT_GRASSLAND   = 4000; // Class 12
+var LIMIT_AGRICULTURE = 50;   // Class 19
+var LIMIT_NON_VEG     = 200;  // Class 25
+var LIMIT_OUTCROP     = 50;   // Class 29
+var LIMIT_WATER       = 900;  // Class 33
+
+// Dynamic farming limits per year (Class 21)
+var getFarmingLimit = function(year) {
+    var limits = { 
+        2016: 2400, 2017: 2500, 2018: 2600, 2019: 2700, 2020: 2800, 
+        2021: 2900, 2022: 2900, 2023: 3000, 2024: 3000, 2025: 3000 
+    };
+    return limits[year] || 900;
+};
+
+// --- B. Balancing Limits (Complementary Samples 8910) ---
+var COMP_FOREST    = 1000;
+var COMP_SAVANNA   = 50;
+var COMP_GRASSLAND = 200;
+var COMP_FARMING   = 50;
+var COMP_CAVE      = 1; // Green grassland
+var COMP_WATER     = 1;
+var COMP_OTHERS    = 50; // Agriculture, Non-veg, Outcrop, Flooded
+
+// ==============================================================================
+// 2. BANDS AND IMPORTS
+// ==============================================================================
+var BANDS_CLASSIFICATION = [
+    "latitude", "ndci_median_wet", "red_edge_2_median", "wetness_median", "mndwi_median_wet", 
+    "hallheight_median", "ireci_median_wet", "longitude", "swir1_median_wet", "swir2_median_wet", 
+    "red_edge_1_median", "hallcover_median_wet", "nir_median", "red_edge_4_median", "wetness_median_wet", 
+    "red_edge_1_median_wet", "brba_median_wet", "brightness_median_dry", "brightness_median", 
+    "swir1_median", "hallcover_median", "merit_dem", "red_edge_2_median_wet", "swir1_median_dry", 
+    "red_edge_3_median", "spri_median_1", "lswi_median_wet", "green_median", "wetness_median_dry",
+    "A00", "A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08", "A09", "A10", "A11", "A12", "A13", "A14", "A15",
+    "A16", "A17", "A18", "A19", "A20", "A21", "A22", "A23", "A24", "A25", "A26", "A27", "A28", "A29", "A30", "A31",  
+    "A32", "A33", "A34", "A35", "A36", "A37", "A38", "A39", "A40", "A41", "A42", "A43", "A44", "A45", "A46", "A47", 
+    "A48", "A49", "A50", "A51", "A52", "A53", "A54", "A55", "A56", "A57", "A58", "A59", "A60", "A61", "A62", "A63"
+];
+
+var addIndex = require('users/gee_arcplan/MapBiomas_Col10_Pantanal:processa_Bandas_Indices_DF_lite');
+var palettes = require('users/mapbiomas/modules:Palettes.js');
+
+// Base Mosaics
+var asset1 = ee.ImageCollection('projects/mapbiomas-mosaics/assets/SENTINEL/BRAZIL/mosaics-3');
+var asset2 = ee.ImageCollection('projects/nexgenmap/MapBiomas2/SENTINEL/mosaics-3').select(BANDS_CLASSIFICATION.slice(29)); // Gets A00-A63
+var colMos = asset1.merge(asset2);
+var mosEmb = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL');
+
+// Regions and Geometries
+var regionsCollection = ee.FeatureCollection('projects/ee-arcplan-df/assets/regioes_pantanal');
+var targetRegion = regionsCollection.filter(ee.Filter.eq('id_reg', 'reg' + REGION_ID));
+
+// Topography and Grids
+var dem = ee.Image('MERIT/DEM/v1_0_3').select('dem').toInt64().rename('merit_dem');
+var aspect = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/aspect").mosaic().multiply(10000).round().rename('aspect').toInt64();
+var convergence = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/convergence").mosaic().multiply(10000).round().rename('convergence').toInt64();
+var roughness = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/roughness").mosaic().multiply(10000).round().rename('roughness').toInt64();
+var eastness = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/eastness").mosaic().multiply(10000).round().rename('eastness').toInt64();
+var northness = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/northness").mosaic().multiply(10000).round().rename('northness').toInt64();
+var dxx = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/dxx").mosaic().multiply(10000).round().rename('dxx').toInt64();
+var cti = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/cti").mosaic().multiply(10000).round().rename('cti').toInt64();
+
+var pixelLonLat = ee.Image.pixelLonLat();
+var longitude = pixelLonLat.select('longitude').add(34.8).multiply(-1).multiply(1000).toInt16().rename('longitude');
+var latitude = pixelLonLat.select('latitude').add(5).multiply(-1).multiply(1000).toInt16().rename('latitude');
+
+// ==============================================================================
+// 3. AUXILIARY FUNCTIONS
+// ==============================================================================
+/**
+ * Adds a random column and shuffles the feature collection
+ */
+var shuffleCollection = function(collection, seedVal) {
+    var withRandom = collection.randomColumn('random', seedVal || 1).sort('random', true);
+    var mapped = withRandom.map(function(feat) {
+        return feat.set('new_id', ee.Number(feat.get('random')).multiply(1e9).round());
+    });
+    var randomIdList = ee.List(mapped.reduceColumns(ee.Reducer.toList(), ['new_id']).get('list'));
+    var sequentialIdList = ee.List.sequence(1, mapped.size());
+    return mapped.remap(randomIdList, sequentialIdList, 'new_id');
+};
+
+if (IS_DEBUG) YEARS = [2023]; // Run only one year if debugging
+var classifiedAllYears = null;
+
+// ==============================================================================
+// 4. MAIN PROCESSING: CLASSIFICATION LOOP
+// ==============================================================================
+YEARS.forEach(function(year) {
+    print('Processing Year: ' + year);
+    
+    // --- 4.1. Build Annual Mosaic ---
+    var baseMosaic = colMos.filter(ee.Filter.eq('year', year)).mosaic();
+    var indicesMosaic = addIndex.get(baseMosaic);
+    var embeddingMosaic = mosEmb.filterDate(year + '-01-01', year + '-12-31').filterBounds(targetRegion.geometry().bounds()).mosaic();
+    
+    var finalMosaic = indicesMosaic
+        .addBands(longitude).addBands(latitude).addBands(dem).addBands(aspect)
+        .addBands(convergence).addBands(roughness).addBands(eastness)
+        .addBands(northness).addBands(dxx).addBands(cti).addBands(embeddingMosaic)
+        .select(BANDS_CLASSIFICATION);
+
+    // --- 4.2. Load and Balance Stable Samples ---
+    var dynamicLimitFarming = getFarmingLimit(year);
+    var baseSamples = ee.FeatureCollection(DIR_SAMPLES + 'pontos_S2_trained_S2_v' + VERSION_IN + '_' + year + '_all_regions')
+                        .filter(ee.Filter.eq('id_reg', 'reg' + REGION_ID));
+    
+    var bdForest      = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 3)), 2).limit(LIMIT_FOREST);
+    var bdSavanna     = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 4)), 2).limit(LIMIT_SAVANNA);
+    var bdFlooded     = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 11)), 2).limit(LIMIT_FLOODED);
+    var bdGrassland   = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 12)), 2).limit(LIMIT_GRASSLAND);
+    var bdAgriculture = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 19)), 2).limit(LIMIT_AGRICULTURE);
+    var bdFarming     = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 21)), 2).limit(dynamicLimitFarming);
+    var bdNonVeg      = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 25)), 2).limit(LIMIT_NON_VEG);
+    var bdOutcrop     = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 29)), 2).limit(LIMIT_OUTCROP);
+    var bdWater       = shuffleCollection(baseSamples.filter(ee.Filter.eq("reference", 33)), 2).limit(LIMIT_WATER);
+
+    // --- 4.3. Load Complementary Samples ---
+    var compSamples = ee.FeatureCollection(DIR_SAMPLES + 'pts_trained_stable8910_S2_v' + VERSION_IN + '_' + year + '_seed_' + SEED + '_all_regions')
+                        .filter(ee.Filter.eq('id_reg', 'reg' + REGION_ID));
+    
+    var sampleCompFromMosaic = function(collection, limitPx) {
+        var mergedImg = collection.reduceToImage({properties: ['reference'], reducer: ee.Reducer.first()}).select([0], ['reference']);
+        return finalMosaic.addBands(mergedImg).sample({
+            numPixels: limitPx, region: collection.filterBounds(targetRegion), scale: 10, seed: 1
+        });
+    };
+
+    var trCompCave      = sampleCompFromMosaic(compSamples.filter(ee.Filter.eq('reference', 12)), COMP_CAVE);
+    var trCompSavanna   = sampleCompFromMosaic(compSamples.filter(ee.Filter.eq('reference', 4)), COMP_SAVANNA);
+    var trCompGrassland = sampleCompFromMosaic(compSamples.filter(ee.Filter.eq('reference', 12)), COMP_GRASSLAND);
+    var trCompForest    = sampleCompFromMosaic(compSamples.filter(ee.Filter.eq('reference', 3)), COMP_FOREST);
+    var trCompFarming   = sampleCompFromMosaic(compSamples.filter(ee.Filter.eq('reference', 21)), COMP_FARMING);
+    var trCompWater     = sampleCompFromMosaic(compSamples.filter(ee.Filter.eq('reference', 33)), COMP_WATER);
+    var trCompOthers    = sampleCompFromMosaic(compSamples.filter(ee.Filter.inList('reference', [19, 25, 29, 11])), COMP_OTHERS);
+
+    // --- 4.4. Merge All Training Data ---
+    var finalTraining = bdForest.merge(bdSavanna).merge(bdGrassland).merge(bdWater).merge(bdFarming)
+        .merge(trCompCave).merge(trCompSavanna).merge(trCompGrassland).merge(trCompForest)
+        .merge(trCompFarming).merge(trCompWater).merge(trCompOthers);
+        
+    finalTraining = finalTraining.filter(ee.Filter.notNull(finalTraining.first().propertyNames()));
+
+    // --- 4.5. Train Classifier and Classify ---
+    var classifier = ee.Classifier.smileRandomForest({numberOfTrees: RF_TREES, variablesPerSplit: 1});
+    classifier = classifier.train(finalTraining, 'reference', BANDS_CLASSIFICATION);
+    
+    var classified = finalMosaic.classify(classifier)
+                        .select(['classification'], ['classification_' + year])
+                        .clip(targetRegion)
+                        .toInt8();
+
+    // Compile years into a single image
+    if (!classifiedAllYears) {
+        classifiedAllYears = classified;
+    } else {
+        classifiedAllYears = classifiedAllYears.addBands(classified);
+    }
+
+    if (IS_DEBUG) {
+        var visPar = { min: 0, max: 75, palette: palettes.get('brazil') };
+        Map.addLayer(finalMosaic, {}, 'Mosaic Sentinel ' + year, false);
+        Map.addLayer(classified, visPar, 'RF Classification ' + year, true);
+    }
+});
+
+// ==============================================================================
+// 5. METADATA AND EXPORT
+// ==============================================================================
+if (!IS_DEBUG) {
+    classifiedAllYears = classifiedAllYears
+        .set('territory', 'BRAZIL')
+        .set('biome', 'PANTANAL')
+        .set('source', 'arcplan')
+        .set('version', VERSION_OUT)
+        .set('collection_id', 10.0); // Adjust to 3.0 if this represents Sentinel Col 3
+
+    var outputName = 'PANT_embS2_reg' + REGION_ID + '_v' + VERSION_OUT + '_RF';
+
+    Export.image.toAsset({
+        image: classifiedAllYears,
+        description: outputName,
+        assetId: DIR_OUT + outputName,
+        scale: 10,
+        pyramidingPolicy: { '.default': 'mode' },
+        maxPixels: 1e13,
+        region: targetRegion
+    });
+}

@@ -1,0 +1,97 @@
+/**
+ * @name 02_merge_and_export.js
+ * @description Merges the regional Random Forest classifications into a single annual map and exports it.
+ * @author @Mariana Dias / mariana@arcplan.com.br
+ * @biome Pantanal
+ */
+
+// ==============================================================================
+// 1. PARAMETERS AND CONSTANTS
+// ==============================================================================
+var IS_DEBUG = false; // Set to true to view on map, false to export
+
+var VERSION_IN = '1';  // Version of the input regional RF classifications
+var VERSION_OUT = '1'; // Version of the output merged classification (Collection 3)
+
+var DIR_IN  = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/';
+var DIR_OUT = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/';
+var PREFIX_OUT = 'PANT_col3_S2_annual_raw_v';
+
+var YEARS = [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
+var REGIONS_LIST = ['1', '2', '3', '4', '5', '6', '7']; // Region 0 is handled separately
+
+var METADATA_DESC = 'Raw classification, no filters, classes 3, 4, 11, 12, 19, 21, 25, 29, 33';
+
+// ==============================================================================
+// 2. IMPORTS AND GEOMETRIES
+// ==============================================================================
+var palettes = require('users/mapbiomas/modules:Palettes.js');
+var visPar = { min: 0, max: 75, palette: palettes.get('brazil') };
+
+// Load regions feature collection
+var regionsCollection = ee.FeatureCollection('projects/ee-arcplan-df/assets/regioes_pantanal');
+
+// Use the bounding box of all regions as the main geometry
+var geometryBounds = regionsCollection.geometry().bounds();
+
+// ==============================================================================
+// 3. MAIN PROCESSING: MERGING REGIONS
+// ==============================================================================
+
+// 3.1. Load and clip classification for regions 1 to 7 programmatically
+var regionImages = REGIONS_LIST.map(function(regId) {
+    var regFeature = regionsCollection.filter(ee.Filter.eq('id_reg', 'reg' + regId));
+    var assetPath = DIR_IN + 'PANT_embS2_reg' + regId + '_v' + VERSION_IN + '_RF';
+    
+    return ee.Image(assetPath).clip(regFeature);
+});
+
+// Create a mosaic from regions 1 to 7
+var mosaicRegions1to7 = ee.ImageCollection(regionImages).mosaic();
+
+// 3.2. Load Region 0 (Base/Background)
+var assetPathReg0 = DIR_IN + 'PANT_embS2_reg0_v' + VERSION_IN + '_RF';
+var reg0Classification = ee.Image(assetPathReg0);
+
+// 3.3. Blend Region 0 (bottom) with the 1-7 Mosaic (top)
+var mergedClassification = reg0Classification.blend(mosaicRegions1to7).toInt8();
+
+// ==============================================================================
+// 4. VISUALIZATION (DEBUG)
+// ==============================================================================
+if (IS_DEBUG) {
+    YEARS.forEach(function(year) {
+        var yearBand = mergedClassification.select('classification_' + year);
+        Map.addLayer(yearBand, visPar, 'Merged Col3 ' + year, false);
+    });
+    
+    // Add region outlines for visual check
+    Map.addLayer(ee.Image().paint(regionsCollection, 0, 2), {palette: 'red'}, 'Regions', false);
+}
+
+// ==============================================================================
+// 5. METADATA AND EXPORT
+// ==============================================================================
+if (!IS_DEBUG) {
+    // Set metadata properties
+    mergedClassification = mergedClassification
+        .set('territory', 'BRAZIL')
+        .set('biome', 'PANTANAL')
+        .set('source', 'arcplan')
+        .set('version', VERSION_OUT)
+        .set('collection_id', 3.0) // Adjust to Sentinel Col 3
+        .set('description', METADATA_DESC);
+
+    var outputName = PREFIX_OUT + VERSION_OUT;
+
+    // Export task
+    Export.image.toAsset({
+        image: mergedClassification,
+        description: outputName,
+        assetId: DIR_OUT + outputName,
+        scale: 10,
+        pyramidingPolicy: { '.default': 'mode' },
+        maxPixels: 1e13,
+        region: geometryBounds
+    });
+}

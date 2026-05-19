@@ -1,0 +1,165 @@
+/**
+ * @name 04_export_trained_samples.js
+ * @description Extracts spectral bands, topographic variables, indices, and embeddings for the training samples.
+ * @author @Mariana Dias / mariana@arcplan.com.br
+ * @biome Pantanal
+ */
+
+// ==============================================================================
+// 1. PARAMETERS AND CONSTANTS
+// ==============================================================================
+var VERSION_IN = '10'; // Input version of the stable points
+var VERSION_OUT = '1'; // Output version (Starting Collection 3)
+var SEED = 1;
+
+var DIR_IN_SAMPLES = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/trained/';
+var DIR_OUT_SAMPLES = 'projects/mapbiomas-workspace/AMOSTRAS/S2_EMBEDDING/PANTANAL/SAMPLES/trained/';
+
+var YEARS = [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024];
+
+// List of regions to process (Uncomment the full list when running for real)
+// var REGIONS_LIST = ['reg1', 'reg2', 'reg3', 'reg4', 'reg5', 'reg6', 'reg7', 'reg0'];
+var REGIONS_LIST = ['reg6']; 
+
+// Spectral bands
+var BANDS = [
+    "blue_median", "blue_median_wet", "blue_median_dry", "blue_stdDev", 
+    "green_median", "green_median_dry", "green_median_wet", "green_median_texture", "green_min", "green_stdDev", 
+    "red_median", "red_median_dry", "red_min", "red_median_wet", "red_stdDev", 
+    "nir_median", "nir_median_dry", "nir_median_wet", "nir_stdDev", 
+    "red_edge_1_median", "red_edge_1_median_dry", "red_edge_1_median_wet", "red_edge_1_stdDev", 
+    "red_edge_2_median", "red_edge_2_median_dry", "red_edge_2_median_wet", "red_edge_2_stdDev", 
+    "red_edge_3_median", "red_edge_3_median_dry", "red_edge_3_median_wet", "red_edge_3_stdDev", 
+    "red_edge_4_median", "red_edge_4_median_dry", "red_edge_4_median_wet", "red_edge_4_stdDev", 
+    "swir1_median", "swir1_median_dry", "swir1_median_wet", "swir1_stdDev", 
+    "swir2_median", "swir2_median_wet", "swir2_median_dry", "swir2_stdDev"
+];
+
+// ==============================================================================
+// 2. IMPORTS AND GEOMETRIES
+// ==============================================================================
+var addIndex = require('users/gee_arcplan/MapBiomas_Col10_Pantanal:processa_Bandas_Indices_DF_lite');
+
+// Base Mosaics
+var asset1 = ee.ImageCollection('projects/mapbiomas-mosaics/assets/SENTINEL/BRAZIL/mosaics-3');
+var asset2 = ee.ImageCollection('projects/nexgenmap/MapBiomas2/SENTINEL/mosaics-3').select(BANDS);
+var colMos = asset1.merge(asset2);
+var mosEmb = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL');
+
+// Geometries (Simplified bounding box to keep the code clean)
+var geometry = ee.Geometry.Polygon([
+    [[-58.9736, -22.2609], [-54.6841, -22.2609], [-54.6841, -15.5355], [-58.9736, -15.5355]]
+]);
+
+// Topographic Variables
+var dem = ee.Image('MERIT/DEM/v1_0_3').select('dem').toInt64().rename('merit_dem');
+var aspect = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/aspect").mosaic().multiply(10000).round().rename('aspect').toInt64();
+var convergence = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/convergence").mosaic().multiply(10000).round().rename('convergence').toInt64();
+var roughness = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/roughness").mosaic().multiply(10000).round().rename('roughness').toInt64();
+var eastness = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/eastness").mosaic().multiply(10000).round().rename('eastness').toInt64();
+var northness = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/northness").mosaic().multiply(10000).round().rename('northness').toInt64();
+var dxx = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/dxx").mosaic().multiply(10000).round().rename('dxx').toInt64();
+var cti = ee.ImageCollection("projects/sat-io/open-datasets/Geomorpho90m/cti").mosaic().multiply(10000).round().rename('cti').toInt64();
+
+// Custom Coordinate Grids
+var pixelLonLat = ee.Image.pixelLonLat();
+var longitude = pixelLonLat.select('longitude').add(34.8).multiply(-1).multiply(1000).toInt16().rename('longitude');
+var latitude = pixelLonLat.select('latitude').add(5).multiply(-1).multiply(1000).toInt16().rename('latitude');
+
+// ==============================================================================
+// 3. AUXILIARY FUNCTIONS
+// ==============================================================================
+/**
+ * Creates an annual mosaic combining spectral bands, indices, topo, and embeddings.
+ */
+function createAnnualMosaic(year) {
+    var baseMosaic = colMos.filterBounds(geometry).filter(ee.Filter.eq('year', year)).mosaic();
+    var mosaicWithIndices = addIndex.get(baseMosaic);
+    var embeddingMosaic = mosEmb.filterDate(year + '-01-01', year + '-12-31').filterBounds(geometry).mosaic();
+    
+    // Combining all layers into a single image to extract samples
+    var finalMosaic = mosaicWithIndices
+        .addBands(longitude)
+        .addBands(latitude)
+        .addBands(dem)
+        .addBands(aspect)
+        .addBands(convergence)
+        .addBands(roughness)
+        .addBands(eastness)
+        .addBands(northness)
+        .addBands(dxx)
+        .addBands(cti)
+        .addBands(embeddingMosaic);
+        
+    return finalMosaic;
+}
+
+// ==============================================================================
+// 4. MAIN PROCESSING: SAMPLE EXTRACTION
+// ==============================================================================
+
+// --- BLOCK 1: Sampling "stable_v3_S2" points ---
+print('--- Starting Block 1: "stable_v3_S2" Sampling ---');
+
+YEARS.forEach(function(year) {
+    // Server-side optimization: create the mosaic once per year
+    var annualMosaic = createAnnualMosaic(year);
+    
+    var pointsStable = ee.FeatureCollection(DIR_IN_SAMPLES + 'pontos_S2_trained_S2_v' + VERSION_IN + '_' + year + '_all_regions');
+    
+    // Map over regions to extract samples efficiently
+    var samplesByRegion = REGIONS_LIST.map(function(region) {
+        var regionPoints = pointsStable.filter(ee.Filter.eq('id_reg', region));
+        
+        return annualMosaic.sampleRegions({
+            collection: regionPoints,
+            scale: 10,
+            tileScale: 16,
+            geometries: true
+        });
+    });
+    
+    // Flatten the list of collections into a single FeatureCollection
+    var totalSamplesYear = ee.FeatureCollection(samplesByRegion).flatten();
+    
+    // Launch export task
+    var assetId = DIR_OUT_SAMPLES + 'pontos_S2_trained_S2_v' + VERSION_OUT + '_' + year + '_all_regions';
+    var taskDescription = 'Trained_S2_' + year + '_all_regions';
+    
+    Export.table.toAsset({
+        collection: totalSamplesYear,
+        description: taskDescription,
+        assetId: assetId
+    });
+});
+
+// --- BLOCK 2: Sampling "stable8910" points ---
+print('--- Starting Block 2: "stable8910" Sampling ---');
+
+YEARS.forEach(function(year) {
+    var annualMosaic = createAnnualMosaic(year);
+    
+    var pointsStable8910 = ee.FeatureCollection(DIR_IN_SAMPLES + 'pts_trained_stable8910_S2_v' + VERSION_IN + '_' + year + '_seed_' + SEED + '_all_regions');
+    
+    var samplesByRegion = REGIONS_LIST.map(function(region) {
+        var regionPointsFiltered = pointsStable8910.filter(ee.Filter.eq('id_reg', region));
+        
+        return annualMosaic.sampleRegions({
+            collection: regionPointsFiltered,
+            scale: 10,
+            tileScale: 16,
+            geometries: true
+        });
+    });
+    
+    var totalSamplesYear = ee.FeatureCollection(samplesByRegion).flatten();
+    
+    var assetId = DIR_OUT_SAMPLES + 'pts_trained_stable8910_S2_v' + VERSION_OUT + '_' + year + '_seed_' + SEED + '_all_regions';
+    var taskDescription = 'Trained_8910_' + year + '_all_regions';
+    
+    Export.table.toAsset({
+        collection: totalSamplesYear,
+        description: taskDescription,
+        assetId: assetId
+    });
+});
